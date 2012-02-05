@@ -5,6 +5,7 @@ use Spreadsheet::Read;
 use DateTime::Format::Excel;
 use Text::CSV_XS;
 use LWP::UserAgent;
+use IO::Scalar;
 
 our $VERSION = '0.1';
 
@@ -13,20 +14,35 @@ get '/' => sub {
 };
 
 post '/to/json' => sub {
-    my $data = parse_sheet();
+    my $data = eval { parse_sheet() };
+    if ($@) {
+        status 'bad_request';
+        return "Error parsing the spreadsheet data: $@";
+    }
     return gut_response('application/json' => encode_json $data);
 };
 
 post '/to/csv' => sub {
-    my $data = parse_sheet();
-    header 'Content-Type' => 'text/csv';
-    my $csv = Text::CSV_XS->new;
-    my @headers = map { $_->{name} } @{ $data->{headers} };
-    $csv->combine(@headers );
-    my $str = $csv->string . "\n";
-    for my $row (@{ $data->{rows} }) {
-        $csv->combine(map { $row->{$_} } @headers);
-        $str .= $csv->string . "\n";
+    my $data = eval { parse_sheet() };
+    if ($@) {
+        status 'bad_request';
+        return "Error parsing the spreadsheet data: $@";
+    }
+    my $str;
+    eval { 
+        header 'Content-Type' => 'text/csv';
+        my $csv = Text::CSV_XS->new;
+        my @headers = map { $_->{name} } @{ $data->{headers} };
+        $csv->combine(@headers );
+        $str = $csv->string . "\n";
+        for my $row (@{ $data->{rows} }) {
+            $csv->combine(map { $row->{$_} } @headers);
+            $str .= $csv->string . "\n";
+        }
+    };
+    if ($@) {
+        status 'bad_request';
+        return "Error composing CSV: $@";
     }
     return gut_response('text/csv' => \$str);
 };
@@ -48,7 +64,10 @@ sub gut_response {
 
 
 sub parse_sheet {
-    my $data = ReadData(request->body,
+    my $body = request->body;
+    my $is_csv = $body =~ m/^"?[\w\d_\-]+"?,/ ? 1 : 0;
+    my $data = ReadData(IO::Scalar->new(\$body),
+        ($is_csv ? (parser => 'csv') : ()),
         # Control the generation of named cells ("A1" etc)
         cells => 0,
         # Control the generation of the {cell}[c][r] entries
@@ -56,6 +75,7 @@ sub parse_sheet {
         # Remove all trailing lines and columns that have no visual data
         clip  => 1,
     );
+    die "Couldn't parse spreadsheet data!" unless $data;
 
     # This is hardcoded to only extract the first sheet.
     my $cells = $data->[1]{cell};
